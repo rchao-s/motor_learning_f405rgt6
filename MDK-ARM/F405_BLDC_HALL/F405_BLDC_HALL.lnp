@@ -1,0 +1,26 @@
+--cpu=Cortex-M4.fp.sp
+"f405_bldc_hall\startup_stm32f405xx.o"
+"f405_bldc_hall\main.o"
+"f405_bldc_hall\stm32f4xx_it.o"
+"f405_bldc_hall\stm32f4xx_hal_msp.o"
+"f405_bldc_hall\stm32f4xx_hal_tim.o"
+"f405_bldc_hall\stm32f4xx_hal_tim_ex.o"
+"f405_bldc_hall\stm32f4xx_hal_rcc.o"
+"f405_bldc_hall\stm32f4xx_hal_rcc_ex.o"
+"f405_bldc_hall\stm32f4xx_hal_flash.o"
+"f405_bldc_hall\stm32f4xx_hal_flash_ex.o"
+"f405_bldc_hall\stm32f4xx_hal_flash_ramfunc.o"
+"f405_bldc_hall\stm32f4xx_hal_gpio.o"
+"f405_bldc_hall\stm32f4xx_hal_dma_ex.o"
+"f405_bldc_hall\stm32f4xx_hal_dma.o"
+"f405_bldc_hall\stm32f4xx_hal_pwr.o"
+"f405_bldc_hall\stm32f4xx_hal_pwr_ex.o"
+"f405_bldc_hall\stm32f4xx_hal_cortex.o"
+"f405_bldc_hall\stm32f4xx_hal.o"
+"f405_bldc_hall\stm32f4xx_hal_exti.o"
+"f405_bldc_hall\stm32f4xx_hal_uart.o"
+"f405_bldc_hall\system_stm32f4xx.o"
+--library_type=microlib --strict --scatter "F405_BLDC_HALL\F405_BLDC_HALL.sct"
+--summary_stderr --info summarysizes --map --load_addr_map_info --xref --callgraph --symbols
+--info sizes --info totals --info unused --info veneers
+--list "F405_BLDC_HALL.map" -o F405_BLDC_HALL\F405_BLDC_HALL.axf
