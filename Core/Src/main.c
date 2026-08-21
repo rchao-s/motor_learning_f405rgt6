@@ -48,6 +48,32 @@ typedef enum {
 
 WorkMode_t current_mode = MODE_DUTY;
 
+
+
+typedef enum{
+	STATE_IDLE=0,
+	STATE_STARTING,
+	STATE_RUNNING,
+	STATE_FAULT,
+	STATE_STOPPING
+}SYSTEM_STATE;
+
+SYSTEM_STATE system_state=STATE_IDLE;
+
+typedef enum {
+    FAULT_NONE = 0,
+    FAULT_OVERCURRENT,   // 过流
+    FAULT_OVERTEMP,      // 过热
+    FAULT_HALL_LOST,     // 霍尔信号丢失
+    FAULT_STARTUP_TIMEOUT, // 启动超时
+    FAULT_COMM_TIMEOUT,  // 通信超时
+    FAULT_UNDERVOLTAGE,  // 欠压
+    FAULT_OVERVOLTAGE    // 过压
+} FaultCode_t;
+
+FaultCode_t current_fault = FAULT_NONE;
+
+
 #define POLE_PAIRS  2           // 电机极对数
 #define EDGES_PER_REV (POLE_PAIRS * 6)  // 每转边沿数 = 6
 #define MAX_PERIOD_US 1000000   // 最大间隔 1s，防止异常
@@ -79,7 +105,9 @@ uint8_t RxBuff[LENGTH];
 volatile uint8_t hall_state=0;
 volatile uint32_t last_edge_time = 0;    // 上次霍尔边沿时间戳 (us)
 volatile uint32_t hall_period_us = 0;    // 霍尔边沿间隔 (us)
-volatile uint32_t last_pi_tick = 0;
+volatile uint32_t last_pi_tick = 0;//计时20ms来算一次PI，并打印一次速度
+volatile uint32_t last_duty_tick = 0;//计时20ms来打印一次速度
+
 
 uint16_t pwm_ccr=50;     //arr�?100，ccr是多少，占空比就是多�?
 uint16_t duty_target=50; //占空比的目标�?
@@ -101,6 +129,9 @@ uint32_t rpm_filter_buf[RPM_FILTER_SIZE] = {0};
 uint8_t rpm_filter_idx = 0;
 float pwm_cmd_f = 30.0f;
 float rpm_integral = 0.0f;
+
+uint32_t last_hall_time = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -125,6 +156,9 @@ void dma_printf(const char *format, ...);
 void update_rpm(void);
 void PI2pwm_ccr(void);
 void print_status(void);
+void fault_detection(void);
+void set_fault(FaultCode_t fault);
+void set_system_state(SYSTEM_STATE new_state);
 /* USER CODE END 0 */
 
 /**
@@ -183,32 +217,70 @@ __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, pwm_ccr);
   while (1)
   {
 
+		fault_detection();
 		
+		if (system_state == STATE_FAULT) 
+		{
+        stop_pwm();
+        HAL_Delay(100);
+        continue;
+    }
 		__HAL_TIM_SET_COMPARE(&htim1,TIM_CHANNEL_1,pwm_ccr);
 		__HAL_TIM_SET_COMPARE(&htim1,TIM_CHANNEL_2,pwm_ccr);
 		__HAL_TIM_SET_COMPARE(&htim1,TIM_CHANNEL_3,pwm_ccr);  
 
-		if(START_CMD==1)
-		{
-			if(current_mode == MODE_DUTY)
+switch (system_state)
+	{
+			case STATE_IDLE:
+			{
+				stop_pwm();  
+				if(START_CMD)
+				{
+					set_system_state(STATE_STARTING);
+					
+				}
+				break;
+			}
+			
+			case STATE_STARTING:
 			{
 				duty_target2pwm_ccr();
 				six_step();
+				break;
 			}
-			else if(current_mode == MODE_RPM)
+			
+			case STATE_RUNNING:
 			{
-				if (HAL_GetTick() - last_pi_tick >= 20)
-			{
-        last_pi_tick = HAL_GetTick();
-        PI2pwm_ccr();
-			}
+				if(current_mode == MODE_DUTY)
+				{
+					duty_target2pwm_ccr();
+				}
+				else if(current_mode == MODE_RPM)
+				{
+					PI2pwm_ccr();
+				}
 				six_step();
+				break;
 			}
+			case STATE_STOPPING:
+			{
+				 if (pwm_ccr > 10) 
+					 {
+              pwm_ccr -= 2;
+              if (pwm_ccr < 10) 
+								pwm_ccr = 10;
+           } 
+					else {
+             set_system_state(STATE_IDLE);
+            }
+            six_step();
+            break;
+					}    
+        default:
+            break;
+			
 		}
-		else
-		{
-			stop_pwm();
-		}
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -489,7 +561,8 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
 	//uint8_t A,B,C;
 	if (GPIO_Pin==HALL_A_Pin || GPIO_Pin==HALL_B_Pin || GPIO_Pin==HALL_C_Pin)
-	{				
+	{	
+		last_hall_time = HAL_GetTick();  // 用于霍尔丢失检测
 		update_rpm();
 		hall_state=read_hall_state();
 		
@@ -545,10 +618,12 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
         else if (strcmp((char*)RxBuff, "start") == 0)
         {
             START_CMD = 1;
+					set_system_state(STATE_STARTING);
             print_status();
         }
         else if (strcmp((char*)RxBuff, "stop") == 0)
         {
+					set_system_state(STATE_STOPPING);
             START_CMD = 0;
             print_status();
         }
@@ -588,6 +663,11 @@ void duty_target2pwm_ccr()
 				pwm_ccr=duty_target;
 				dutyacc=0;
 			}
+		if (HAL_GetTick() - last_pi_tick >= 50)
+		{
+			last_pi_tick = HAL_GetTick();
+			dma_printf("DUTY_TARGET : %d   DUTY : %d   ACTUAL RPM : %d\r\n",duty_target,pwm_ccr,current_rpm);
+		}
 }	
 void six_step()
 {
@@ -704,51 +784,45 @@ void PI2pwm_ccr(void)
 
     rpm = (int32_t)current_rpm;
     error_rpm = (int32_t)rpm_target - rpm;
+	
+		if (HAL_GetTick() - last_pi_tick >= 20)
+		{
+				last_pi_tick = HAL_GetTick();
 
-//    /* 启动阶段：没测速时先给一个能转起来的占空比 */
-//    if (rpm == 0)
-//    {
-//        if (pwm_cmd_f < STARTUP_DUTY)
-//        {
-//            pwm_cmd_f = STARTUP_DUTY;
-//        }
-
-//        pwm_ccr = (uint16_t)(pwm_cmd_f + 0.5f);
-//        return;
-//    }
-
-    /* 小误差死区 */
-    if (error_rpm > -RPM_DEADBAND && error_rpm < RPM_DEADBAND)
-    {
-        pwm_ccr = (uint16_t)(pwm_cmd_f + 0.5f);
-        return;
-    }
-
-    /* 积分 */
-    rpm_integral += (float)error_rpm;
-
-    if (rpm_integral > 50000.0f)  rpm_integral = 50000.0f;
-    if (rpm_integral < -50000.0f) rpm_integral = -50000.0f;
-
-    duty_delta = rpm_Kp * (float)error_rpm + rpm_Ki * rpm_integral;
-
-    /* 每 20ms 最多变 1% duty，防止猛冲 */
-    if (duty_delta > 1.0f)  duty_delta = 1.0f;
-    if (duty_delta < -1.0f) duty_delta = -1.0f;
-
-    /* 关键：不要直接把 duty_delta 转成 int，要先累加到 float */
-    pwm_cmd_f += duty_delta;
-
-    if (pwm_cmd_f < DUTY_MIN_RPM_MODE) pwm_cmd_f = DUTY_MIN_RPM_MODE;
-    if (pwm_cmd_f > DUTY_MAX_RPM_MODE) pwm_cmd_f = DUTY_MAX_RPM_MODE;
-
-    pwm_ccr = (uint16_t)(pwm_cmd_f + 0.5f);
+			/* 小误差死区 */
+			if (error_rpm > -RPM_DEADBAND && error_rpm < RPM_DEADBAND)
+			{
+					pwm_ccr = (uint16_t)(pwm_cmd_f + 0.5f);
+					return;
+			}
+	
+			/* 积分 */
+			rpm_integral += (float)error_rpm;
+	
+			if (rpm_integral > 50000.0f)  rpm_integral = 50000.0f;
+			if (rpm_integral < -50000.0f) rpm_integral = -50000.0f;
+	
+			duty_delta = rpm_Kp * (float)error_rpm + rpm_Ki * rpm_integral;
+	
+			/* 每 20ms 最多变 1% duty，防止猛冲 */
+			if (duty_delta > 1.0f)  duty_delta = 1.0f;
+			if (duty_delta < -1.0f) duty_delta = -1.0f;
+	
+			/* 关键：不要直接把 duty_delta 转成 int，要先累加到 float */
+			pwm_cmd_f += duty_delta;
+	
+			if (pwm_cmd_f < DUTY_MIN_RPM_MODE) pwm_cmd_f = DUTY_MIN_RPM_MODE;
+			if (pwm_cmd_f > DUTY_MAX_RPM_MODE) pwm_cmd_f = DUTY_MAX_RPM_MODE;
+	
+			pwm_ccr = (uint16_t)(pwm_cmd_f + 0.5f);
+			dma_printf("RPM_TARGET : %d   ACTUAL RPM : %d\r\n",rpm_target,current_rpm);
+		}
 
 }
 
 void update_rpm(void)
 {
-     uint32_t period_us;
+    uint32_t period_us;
     uint32_t current_time = __HAL_TIM_GET_COUNTER(&htim2);
     uint32_t single_rpm;
     
@@ -783,6 +857,84 @@ void update_rpm(void)
         sum += rpm_filter_buf[i];
     }
     current_rpm = sum / RPM_FILTER_SIZE;
+}
+
+
+
+void set_system_state(SYSTEM_STATE new_state)
+{
+    // 状态进入/退出处理
+    switch (new_state)
+    {
+        case STATE_IDLE:
+				{ stop_pwm();
+            dma_printf("System: IDLE\r\n");
+            break;}
+            
+        case STATE_STARTING:
+				{ dma_printf("System: STARTING...\r\n");
+            // 执行启动前准备（如霍尔对齐、关制动等）
+            break;}
+            
+        case STATE_RUNNING:
+				{ dma_printf("System: RUNNING\r\n");
+            break;}
+            
+        case STATE_FAULT:
+				{stop_pwm();
+            dma_printf("System: FAULT! Code: %d\r\n", current_fault);
+            break;}
+            
+        case STATE_STOPPING:
+				{dma_printf("System: STOPPING...\r\n");
+            break;}
+    }
+    
+    system_state = new_state;
+}
+
+void set_fault(FaultCode_t fault)
+{
+    if (current_fault == FAULT_NONE) {
+        current_fault = fault;
+        set_system_state(STATE_FAULT);
+    }
+}
+void fault_detection(void)
+{    
+    // 1. 霍尔信号丢失检测
+    if (START_CMD && current_rpm > 0) {
+        if (HAL_GetTick() - last_hall_time > 1000) {  // 1秒没有霍尔边沿
+            set_fault(FAULT_HALL_LOST);
+            return;
+        }
+    }
+    
+    // 2. 启动超时检测
+    if (system_state == STATE_STARTING) {
+        static uint32_t start_time = 0;
+        if (start_time == 0) start_time = HAL_GetTick();
+        if (HAL_GetTick() - start_time > 3000) {  // 3秒启动超时
+            set_fault(FAULT_STARTUP_TIMEOUT);
+            return;
+        }
+        if (current_rpm > 100) {  // 启动成功
+            start_time = 0;
+            set_system_state(STATE_RUNNING);
+        }
+    }
+    
+    // 3. 过流检测（假设有 ADC 读取）
+    // if (adc_current > CURRENT_THRESHOLD) {
+    //     set_fault(FAULT_OVERCURRENT);
+    //     return;
+    // }
+    
+    // 4. 欠压检测
+    // if (adc_voltage < VOLTAGE_THRESHOLD) {
+    //     set_fault(FAULT_UNDERVOLTAGE);
+    //     return;
+    // }
 }
 
 
